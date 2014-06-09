@@ -1,3 +1,4 @@
+/* -*- mode: c; c-file-style: "gnu" -*- */
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -8,25 +9,92 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <stdbool.h>
 
-void get_code (char * buf, const int len)
+#include <tss/tss_error.h>
+#include <tss/platform.h>
+#include <tss/tss_defines.h>
+#include <tss/tss_typedef.h>
+#include <tss/tss_structs.h>
+#include <tss/tspi.h>
+#include <trousers/trousers.h>
+
+
+#define DEBUG 1
+/* TPM Debug */
+#define DBG(message,tResult) if(DEBUG) {                        \
+        printf("(Line %d, %s) %s returned 0x%08x. %s.\n",       \
+               __LINE__,                                        \
+               __func__,                                        \
+               message,                                         \
+               tResult,                                         \
+               Trspi_Error_String(tResult));                    \
+    }
+
+
+TSS_RESULT extend_pcr (const char * buf, const int len)
+{
+
+    TSS_HCONTEXT hContext=0;
+    TSS_HTPM hTPM = 0;
+    TSS_RESULT result;
+    TSS_HKEY hSRK = 0;
+    TSS_HPOLICY hSRKPolicy=0;
+    TSS_HPOLICY hOwnerPolicy=0;
+    TSS_UUID SRK_UUID = TSS_UUID_SRK;
+    BYTE passcode[20];
+
+    memset(passcode,0,20);
+    memcpy (passcode, buf, len);
+
+    UINT32 ulNewPcrValueLength;
+    BYTE* NewPcrValue;
+
+    result = Tspi_Context_Create (&hContext);
+
+    DBG(" Create a Context\n",result);
+    result = Tspi_Context_Connect (hContext, NULL);
+    DBG(" Connect to TPM\n", result);
+
+    // Get the TPM handle
+    result = Tspi_Context_GetTpmObject (hContext, &hTPM);
+    DBG(" Get TPM Handle\n",result);
+
+    result = Tspi_GetPolicyObject (hTPM, TSS_POLICY_USAGE, &hOwnerPolicy);
+    DBG( " Owner Policy\n", result);
+
+    result = Tspi_TPM_PcrExtend (hTPM,
+                                 9,
+                                 sizeof(passcode),
+                                 passcode,
+                                 NULL,
+                                 &ulNewPcrValueLength,
+                                 &NewPcrValue);
+
+    DBG(" extend\n",result);
+
+    return result;
+}
+
+bool get_code (char * buf, const int len)
 {
   int fd;
   char *filename = "/dev/i2c-1";
   const int addr = 0x42;
+  bool result = false;
 
-  if ((fd = open(filename, O_RDWR)) < 0)
+  if ((fd = open (filename, O_RDWR)) < 0)
     {
-      perror("Failed to open the i2c bus");
-      exit(1);
+      perror ("Failed to open the i2c bus");
+      exit (EXIT_FAILURE);
     }
 
 
   if (ioctl(fd, I2C_SLAVE, addr) < 0)
     {
-      printf("Failed to acquire bus access and/or talk to slave.\n");
+      perror ("Failed to acquire bus access and/or talk to slave.\n");
       close (fd);
-      exit(1);
+      exit (EXIT_FAILURE);
     }
 
   const char * cmd = "HI";
@@ -35,7 +103,7 @@ void get_code (char * buf, const int len)
     {
       perror ("Failed to write to device");
       close (fd);
-      exit (1);
+      exit (EXIT_FAILURE);
     }
 
   /* Wait for pin entry */
@@ -48,18 +116,33 @@ void get_code (char * buf, const int len)
     }
   else
     {
+#ifdef DEBUG
       int x = 0;
       for (x = 0; x < len; x++)
         printf("%c", buf[x]);
       printf ("\n");
+#endif
+      result = true;
     }
 
   close (fd);
 
 }
-void main ()
+
+int main ()
 {
   char buf[5] = {0};
+  bool result = false;
 
-  get_code (buf, sizeof(buf));
+  if (get_code (buf, sizeof(buf)))
+
+    {
+      if (TSS_SUCCESS == extend_pcr (buf, sizeof(buf)))
+        {
+          result = true;
+        }
+    }
+
+  return (result) ? EXIT_SUCCESS : EXIT_FAILURE;
+
 }
